@@ -18,6 +18,9 @@ import(
 
 // Block由区块头何交易两部分构成
 
+const dbFile = "blockchain.db"
+const blocksBucket = "blocks"
+
 type Block struct{
 	TimeStamp int64
 	PrevBlockHash []byte
@@ -43,11 +46,11 @@ func (pow *ProofOfWork) Run() (int,[]byte){
 	var hash [32]byte
 	nonce :=0
 	maxNonce :=math.MaxInt64
-	fmt.Printf("Mining the block containing \"%s\"\n",pow.block.Data)
 	
 	for nonce<maxNonce{
+		fmt.Printf("Mining the block containing \"%s\"\n",pow.block.Data)
 		data :=pow.prepareData(nonce)
-		
+
 		hash=sha256.Sum256(data)
 		hashInt.SetBytes(hash[:])
 		
@@ -100,17 +103,22 @@ func (bc *BlcokChain) AddBlock(data string){
 		lastHash = b.Get([]byte("l"))
 		return nil
 	})
+	if err != nil {
+		log.Panic(err)
+	}
 	
 	newBlock :=NewBlock(data,lastHash)
 	
 	err = bc.db.Update(func(tx *bolt.Tx) error{
 		b :=tx.Bucket([]byte(blocksBucket))
 		err :=b.Put(newBlock.Hash,newBlock.Serialize())
+		if err != nil {
+		log.Panic(err)
+		}
 		err =b.Put([]byte("l"),newBlock.Hash)
 		bc.tip=newBlock.Hash
 		return nil
 	})
-	
 }
 //检查区块链，使用一个区块链迭代器读取他们
 type BlockchainIterator struct{
@@ -118,7 +126,7 @@ type BlockchainIterator struct{
 	db *bolt.DB
 }
 
-func (bc *Blockchain) Iterator() *BlockchainIterator{
+func (bc *BlcokChain) Iterator() *BlockchainIterator{
 	bci :=&BlockchainIterator{bc.tip,bc.db}
 	
 	return bci
@@ -136,8 +144,11 @@ func (i *BlockchainIterator) Next() *Block{
 		
 		return nil
 	})
+	if err != nil {
+		log.Panic(err)
+	}
 	
-	i.currentHash=block.prevBlockHash
+	i.currentHash=block.PrevBlockHash
 	
 	return block
 }
@@ -147,40 +158,52 @@ func (i *BlockchainIterator) Next() *Block{
 
 
 
-const targetBits =10  //表示前24位为0
+const targetBits =24  //表示前24位为0
 
 //将Block序列化为一个字节数组
-func (b* Block) Serialize() []byte{
-	var result bytes.Buffer
-	encoder :=gob.NewEnCoder(&result)
-	
-	err :=encoder.Encoder(b)
-	
-	return result.bytes()
-}
 
+func (b *Block) Serialize() []byte {
+	var result bytes.Buffer
+	encoder := gob.NewEncoder(&result)
+
+	err := encoder.Encode(b)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	return result.Bytes()
+}
 //将字节数组反序列化为Block
 func DeserializeBlock(d []byte) *Block{
 	var block Block
 	
 	decoder :=gob.NewDecoder(bytes.NewReader(d))
 	err :=decoder.Decode(&block)
+	if err != nil {
+		log.Panic(err)
+	}
 	return &block
 }
 
 //持久化
-func NewBlockChain1() *Blockchain{
+func NewBlockChain() *BlcokChain{
 	var tip []byte
 	//打开一个BoltDB文件的标准做法
 	db,err :=bolt.Open(dbFile,0600,nil)
+	if err != nil {
+		log.Panic(err)
+	}
 	err =db.Update(func(tx *bolt.Tx) error{
 		//函数的核心，先获取存储快的bucket
 		b :=tx.Bucket([]byte(blocksBucket))
 		//如果数据库中不存在区块链就创建一个，否则直接读取最后一个快的哈希
 		if b==nil{
-			fmt.Println("No existing blockchain found. create a new one...")
+			fmt.Println("No existing BlcokChain found. create a new one...")
 			genesis :=NewGenesisBlock()
 			b, err :=tx.CreateBucket([]byte(blocksBucket))
+			if err != nil {
+		log.Panic(err)
+			}
 			err =b.Put(genesis.Hash,genesis.Serialize())
 			err =b.Put([]byte("l"),genesis.Hash)
 			tip=genesis.Hash
@@ -190,10 +213,14 @@ func NewBlockChain1() *Blockchain{
 		return nil
 	})
 	//创建BlockChain的一个新方式
-	bc :=BlockChain{tip,db}	
+	bc :=BlcokChain{tip,db}	
 	return &bc
 }
 
+// NewGenesisBlock creates and returns genesis Block
+func NewGenesisBlock() *Block {
+	return NewBlock("Genesis Block", []byte{})
+}
 
 //每个块的工作量要得到证明，需要指向Block的指针
 //target是目标，最终要找的哈希小于目标
@@ -244,6 +271,45 @@ type CLI struct{
 	bc *BlcokChain
 }
 
+func (cli *CLI) printUsage(){
+	fmt.Println("Usage")
+	fmt.Println("addblock -data BLOCK_DATA -add a block to the blockchain")
+	fmt.Println("printchain -print all the blocks of the blockchain")
+}
+
+func (cli *CLI) validateArgs(){
+	if len(os.Args)<2{
+		cli.printUsage()
+		os.Exit(1)
+	}
+}
+
+func (cli *CLI) addBlock(data string){
+	cli.bc.AddBlock(data)
+	fmt.Println("Success")
+}
+
+func (cli *CLI) printchain(){
+	bci:=cli.bc.Iterator()
+	
+	for{
+		block :=bci.Next()
+		
+		fmt.Println("Prev Hash:%x\n",block.PrevBlockHash)
+		fmt.Println("Data %s\n",block.Data)
+		fmt.Println("Hash %x\n",block.Hash)
+		pow :=NewProofOfWork(block)
+		
+		fmt.Println("Pow %s\n",strconv.FormatBool(pow.Validata()))
+		fmt.Println()
+		if len(block.PrevBlockHash)==0{
+			break
+		}
+	}
+}
+
+
+
 //入口是Run函数
 
 func (cli *CLI) Run(){
@@ -257,9 +323,15 @@ func (cli *CLI) Run(){
 	//使用用户提供的命令，解析flag子命令
 	switch os.Args[1]{
 		case "addblock":
-			err :=addBlockCmd.parse(os.Args[2:])
+			err :=addBlockCmd.Parse(os.Args[2:])
+			if err != nil {
+		log.Panic(err)
+	}
 		case "printchain":
 			err := printChainCmd.Parse(os.Args[2:])
+			if err != nil {
+		log.Panic(err)
+	}
 		default:
 			cli.printUsage()
 			os.Exit(1)
@@ -272,7 +344,7 @@ func (cli *CLI) Run(){
 		}
 		cli.bc.AddBlock(*addBlockData)
 	}
-	if printChainCmd.parse(){
+	if printChainCmd.Parsed(){
 		cli.printchain()
 	}
 }

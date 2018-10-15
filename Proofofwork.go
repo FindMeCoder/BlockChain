@@ -150,7 +150,6 @@ func (pow *ProofOfWork) prepareData(nonce int) []byte{
 }
 
 
-
 //对工作量证明进行验证，只要哈希小于目标就是有效工作量
 func (pow *ProofOfWork) Validata() bool{
 	var hashInt big.Int
